@@ -15,6 +15,9 @@ byte layout by hand (it does NOT read the header). The two MUST stay in sync.
 - Shared renderer code in `firmware/lib/blink/` is compiled by BOTH the firmware and `preview/` —
   changes there affect hardware and the desktop preview.
 - Frame rate split: host sends ~20 Hz; renderer runs 60 fps; GIF dump runs 30 fps.
+- New engine ids need no protocol change and can't break an old panel: the parser checks version
+  and CRC but never the engine byte, so an unknown id reaches `primary()`'s `default:` and renders
+  violet. The panel that shipped predates `ENGINE_MAYA`, so Maya is violet until it is reflashed.
 - Event counters are 16-bit free-running and wrap at 65536; the panel diffs them, so a dropped
   UDP frame loses nothing. Don't encode deltas per-frame.
 
@@ -51,6 +54,22 @@ pio run -e ota -t upload                           # every later flash (over Wi-
 ```
 On Windows use `py -m platformio` instead of `pio`.
 
+### Reflashing the deployed panel (deferred, unresolved)
+
+The panel at 192.168.121.7 (`blinkpanel`) predates `ENGINE_MAYA` and still needs one flash for
+Maya's teal. Two blockers found investigating — resolve both before trying again:
+
+- **Chip family is unconfirmed.** `platformio.ini` defaults `usb`/`ota` to `esp32dev`, but
+  `s3-ota` pins this panel's exact IP and the status page reports ~261 KB free heap (an S3 tells,
+  not a classic ESP32). A wrong-family flash boots to Wi-Fi and OTA again but paints the panel
+  garbled until recovered over USB — which means unmounting it. Confirm via the silkscreen or the
+  `esptool chip CPU id` line of a USB connect before choosing `ota` vs `s3-ota`.
+- **OTA is not reachable right now.** Nothing answers UDP/3232 (this core's `ArduinoOTA::begin()`
+  default, confirmed in `libraries/ArduinoOTA/src/ArduinoOTA.cpp`) — probed from both WSL and
+  wheatley on the flat LAN, while the panel's `:80` status page and UDP/4210 frames are healthy.
+  So `-e ota -t upload` cannot work as documented; the running sketch's OTA listener may be dead,
+  or a firewall is in the way. Expect to need a USB session.
+
 ## Firmware gotchas
 
 - Toolchain is PINNED in `platformio.ini`: `espressif32@6.9.0` + `FastLED@3.7.8`. Newer FastLED
@@ -84,6 +103,8 @@ On Windows use `py -m platformio` instead of `pio`.
 
 ## Conventions
 
-- Not a git repo here; no CI / lint / formatter config exists. Match surrounding style.
+- No CI / lint / formatter config exists. Match surrounding style.
+- Deployed on wheatley at `/usr/local/bin/blinkd.py` under `blinkd.service`; deploying means
+  `scp host/blinkd.py jason@wheatley:` then `sudo cp` it there and `systemctl restart blinkd`.
 - Protocol changes: edit `blink_protocol.h` AND the mirroring code in `blinkd.py` together, then
   run `python3 host/test_blinkd.py` and rebuild `preview/` to confirm the 92-byte layout holds.
