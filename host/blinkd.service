@@ -11,9 +11,16 @@ After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /usr/local/bin/blinkd.py --udp blinkpanel.local --url http://127.0.0.1:8085 --url http://127.0.0.1:8081 --max-tps 100 --brightness 10
+ExecStart=/usr/bin/python3 /usr/local/bin/blinkd.py --udp blinkpanel.local --url http://127.0.0.1:8085 --url http://127.0.0.1:8081 --url http://127.0.0.1:8087 --max-tps 100 --brightness 10
 # USB instead: --serial /dev/ttyUSB0
-# Environment=BLINKD_API_KEY=your-strata-key
+# Engines in Docker are invisible to /proc discovery (docker-proxy owns the listen socket), so
+# list every engine port here: strata 8085, llama routers 8083/8084, Maya 8087.
+# strata 0.2 needs a bearer key; keep it out of this world-readable file. Create it with
+#   printf 'BLINKD_API_KEY=...\n' | sudo tee /etc/blinkd.env && sudo chmod 600 /etc/blinkd.env
+# env files do NOT strip inline comments, so put nothing after the value. The leading "-" makes a
+# missing file tolerable: without it systemd refuses to start the unit at all, with it blinkd just
+# 401s against strata (visible in the log) rather than dying silently.
+EnvironmentFile=-/etc/blinkd.env
 Restart=always
 RestartSec=3
 Nice=10

@@ -70,9 +70,17 @@ On Windows use `py -m platformio` instead of `pio`.
 - Run as root (or as the engine's user) so it can read the engine's per-thread CPU. USB mode needs
   the user in the `dialout` group.
 - `--dump` prints normalized signals once a second — use it to confirm GPUs/disks/engine are seen.
-- Engine discovery: `--url` (repeatable) or auto-discovered by process name; the poller follows
-  whichever engine is actually busy when multiple are given. strata API key via `--api-key` or
-  `BLINKD_API_KEY`.
+  Always pass `--url` when dumping: without it blinkd relies on discovery and reports `[none down]`.
+- Engines run in Docker, so the host's listen socket belongs to `docker-proxy`, not the engine.
+  `discover_engines()` matches the *listening* process's cmdline and therefore never finds them —
+  `--url` (repeatable) is mandatory in practice, not a convenience. The poller follows whichever
+  engine is actually busy. On wheatley: strata `:8085`, llama routers `:8083`/`:8084`, Maya `:8087`.
+- Engine identity comes from `/health`: strata sends `service:"strata"`, Maya sends `version` with
+  no `service`, llama.cpp sends neither. Missing the Maya case makes it fall through as llama.cpp.
+- **strata 0.2 requires a bearer key on every endpoint but `/health`** — without one blinkd finds
+  strata, then loops `lost ...: 401` and the panel goes dark. Set `BLINKD_API_KEY` (or `--api-key`);
+  one key is sent to every engine, which is safe because engines that don't ask ignore the header.
+  Only strata has a key today (read from the container's `API_KEY` env); Maya and llama.cpp don't.
 
 ## Conventions
 
