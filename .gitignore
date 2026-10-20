@@ -1,0 +1,15 @@
+# Wi-Fi + OTA credentials: copy src/secrets.example.h to src/secrets.h (a #error fires without it)
+firmware/src/secrets.h
+
+# PlatformIO build output
+.pio/
+
+# Preview binary (make -C preview produces preview/preview)
+preview/preview
+
+# GIF / frame dumps from preview --dump
+*.rgb
+
+# Python
+__pycache__/
+*.pyc

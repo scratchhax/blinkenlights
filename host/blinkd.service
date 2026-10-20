@@ -1,0 +1,22 @@
+# systemd unit for blinkd. Install:
+#   sudo cp blinkd.py /usr/local/bin/blinkd.py
+#   sudo cp blinkd.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now blinkd
+# Runs as root so it can see the engine's threads whoever started it;
+# any user works too if the engine runs as that user (add it to dialout for USB).
+[Unit]
+Description=Blinkenlights panel feeder for llama.cpp / strata
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/blinkd.py --udp blinkpanel.local --url http://127.0.0.1:8085 --url http://127.0.0.1:8081 --max-tps 100 --brightness 10
+# USB instead: --serial /dev/ttyUSB0
+# Environment=BLINKD_API_KEY=your-strata-key
+Restart=always
+RestartSec=3
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
