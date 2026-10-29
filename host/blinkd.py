@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """blinkd - feeds the blinkenlights panel with everything the LLM host is doing.
 
-Samples llama.cpp, strata or Maya (found by process and port, or --url), AMD GPUs through sysfs, and the
+Samples llama.cpp, strata, DeepSeek or Maya (found by process and port, or --url), AMD GPUs through sysfs, and the
 kernel's /proc counters, normalizes it all, and sends a 92-byte frame 20 times a second to
 the ESP32 over USB serial and/or UDP. The panel does all the animation itself.
 
@@ -44,7 +44,11 @@ LEVELS = [
 ]
 RAW_COUNTS = {"queued", "running", "connections"}  # sent as plain counts, not 0..1
 COUNTERS = ["tokens", "prompt8", "req_start", "req_end", "drafts_accepted", "disk_bursts"]
-ENGINE_NONE, ENGINE_LLAMA, ENGINE_STRATA, ENGINE_MAYA = 0, 1, 2, 3
+ENGINE_NONE, ENGINE_LLAMA, ENGINE_STRATA, ENGINE_MAYA, ENGINE_DEEPSEEK = 0, 1, 2, 3, 4
+# The engine byte the panel is sent. DeepSeek is its own engine here (detection, logs, --dump) but
+# goes out as strata, whose server it runs on: the firmware has no DeepSeek colour, and the panel's
+# firmware predates even ENGINE_MAYA, so a new id would only render as the unknown-engine violet.
+WIRE_ENGINE = {ENGINE_DEEPSEEK: ENGINE_STRATA}
 STATE_DOWN, STATE_IDLE, STATE_READING, STATE_GENERATING = 0, 1, 2, 3
 N_CORES, N_GPUS, N_THREADS = 16, 8, 14
 FULL_TPS = 120.0  # tokens a second that count as "flat out" (--max-tps)
@@ -68,6 +72,7 @@ def pack_frame(seq: int, engine: int, state: int, levels: dict, cores: list, gpu
                threads: list, counters: dict, brightness: int = 0) -> bytes:
     lv = bytes(min(255, max(0, int(levels.get(n, 0)))) if n in RAW_COUNTS else u8(levels.get(n, 0.0))
                for n in LEVELS)
+    engine = WIRE_ENGINE.get(engine, engine)
     body = (bytes([ord("B"), ord("L"), 1, seq & 0xFF, engine, state, min(len(gpus), N_GPUS), brightness & 0xFF]) + lv
             + bytes(u8(v) for v in (cores + [0.0] * N_CORES)[:N_CORES])
             + bytes(u8(v) for v in (gpus + [0.0] * N_GPUS)[:N_GPUS])
@@ -622,7 +627,8 @@ class EnginePoller(threading.Thread):
         else:
             return ENGINE_NONE, STATE_DOWN
         if url != self.url or engine != self.engine:
-            names = {ENGINE_LLAMA: "llama.cpp", ENGINE_STRATA: "strata", ENGINE_MAYA: "Maya"}
+            names = {ENGINE_LLAMA: "llama.cpp", ENGINE_STRATA: "strata", ENGINE_MAYA: "Maya",
+                     ENGINE_DEEPSEEK: "DeepSeek"}
             print(f"blinkd: watching {names[engine]} at {url}", file=sys.stderr)
         if url != self.url:
             self.router, self.model, self.model_at = False, None, 0.0
@@ -689,7 +695,12 @@ class EnginePoller(threading.Thread):
             return (ENGINE_LLAMA, STATE_DOWN) if e.code == 503 else (ENGINE_NONE, STATE_DOWN)
         if isinstance(h, dict):
             if h.get("service") == "strata":
-                return ENGINE_STRATA, STATE_IDLE if h.get("loaded", True) else STATE_DOWN
+                # DeepSeek-V4.1-Flash runs on strata's own server (0.2.7, its strata-dsv41 engine) in
+                # a container of its own, so it says service:strata too; the model it names is what
+                # tells it apart. Read exactly as strata from here on: same /metrics.
+                deepseek = str(h.get("model") or "").lower().startswith("deepseek")
+                return (ENGINE_DEEPSEEK if deepseek else ENGINE_STRATA,
+                        STATE_IDLE if h.get("loaded", True) else STATE_DOWN)
             # Maya forks strata's server but serves strata's /metrics without naming itself in
             # /health; a version key with no service tag is the only thing that tells them apart.
             if h.get("version") and "service" not in h:
@@ -844,7 +855,7 @@ class EnginePoller(threading.Thread):
 # --------------------------------------------------------------------------- simulation
 class Simulator:
     """Fake engine and host activity, so the panel can be tuned with no model running.
-    Alternates llama.cpp, strata and Maya each cycle so all three color schemes show."""
+    Alternates llama.cpp, strata, Maya and DeepSeek each cycle so every color scheme shows."""
 
     def __init__(self):
         self.t0 = time.monotonic()
@@ -863,8 +874,8 @@ class Simulator:
         t = time.monotonic() - self.t0
         cycle_len = 14.0
         cycle, ct = int(t // cycle_len), t % cycle_len
-        engine = (ENGINE_LLAMA, ENGINE_STRATA, ENGINE_MAYA)[cycle % 3]
-        expert = engine in (ENGINE_STRATA, ENGINE_MAYA)  # strata's server (and its Maya fork)
+        engine = (ENGINE_LLAMA, ENGINE_STRATA, ENGINE_MAYA, ENGINE_DEEPSEEK)[cycle % 4]
+        expert = engine != ENGINE_LLAMA  # strata's server (DeepSeek on it, and its Maya fork)
         if ct < 3:
             phase, state = "idle", STATE_IDLE
         elif ct < 4.5:

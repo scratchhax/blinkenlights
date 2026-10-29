@@ -68,7 +68,10 @@ class FakeEngine(BaseHTTPRequestHandler):
             if self.path == "/health":
                 # Maya forks strata's server: it serves strata's /metrics but does not tag itself
                 # in /health, so blinkd has to pick it out by the version key and no service.
+                # DeepSeek runs on strata's server too, and only the model it names sets it apart.
                 body = {"status": "ok", "service": "strata", "loaded": True} if self.kind == "strata" \
+                    else {"status": "ok", "service": "strata", "loaded": True,
+                          "model": "deepseek-v4.1-flash"} if self.kind == "deepseek" \
                     else {"status": "ok", "version": "1.1.18", "loaded": True}
                 return self._send(200, body)
             if self.path == "/metrics":
@@ -185,6 +188,24 @@ class EngineTests(unittest.TestCase):
         self.assertGreater(counts["drafts_accepted"], 0)
         self.assertAlmostEqual(levels["expert_hit"], 0.8)
         self.assertEqual(levels["queued"], 1)
+
+    def test_deepseek(self):
+        # DeepSeek-V4.1-Flash on strata 0.2.7's server: /health says service:strata, like the Qwen
+        # install, and names a deepseek model. Its own engine id, strata's metrics.
+        (engine, _, levels, counts), states = self.run_poller("deepseek")
+        self.assertEqual(engine, blinkd.ENGINE_DEEPSEEK)
+        self.assertIn(blinkd.STATE_GENERATING, states)
+        self.assertGreater(counts["tokens"], 100)
+        self.assertGreater(counts["prompt8"], 100)
+        self.assertGreaterEqual(counts["req_end"], 1)
+        self.assertGreater(counts["drafts_accepted"], 0)
+        self.assertAlmostEqual(levels["expert_hit"], 0.8)
+        self.assertEqual(levels["queued"], 1)
+
+    def test_deepseek_goes_out_as_strata(self):
+        # The firmware has no DeepSeek colour; on the wire it is strata, whose server it runs on.
+        self.assertEqual(blinkd.pack_frame(0, blinkd.ENGINE_DEEPSEEK, 1, {}, [], [], [], {})[4], blinkd.ENGINE_STRATA)
+        self.assertEqual(blinkd.pack_frame(0, blinkd.ENGINE_MAYA, 1, {}, [], [], [], {})[4], blinkd.ENGINE_MAYA)
 
     def test_nothing_listening(self):
         p = blinkd.EnginePoller("http://127.0.0.1:9", None)
