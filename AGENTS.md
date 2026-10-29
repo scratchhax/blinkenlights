@@ -2,7 +2,7 @@
 
 Blinkenlights: a 16x16 WS2812B panel driven by LLM-engine + host telemetry.
 Three parts share one wire protocol:
-- `host/blinkd.py` — Python collector: reads llama.cpp/strata/Maya + AMD GPUs + `/proc`, emits 92-byte frames at 20 Hz over UDP or USB serial.
+- `host/blinkd.py` — Python collector: reads llama.cpp/strata/DeepSeek/Maya + AMD GPUs + `/proc`, emits 92-byte frames at 20 Hz over UDP or USB serial.
 - `firmware/` — ESP32 (PlatformIO + FastLED): parses frames, animates at 60 fps, OTA updates.
 - `preview/` — the firmware renderer rebuilt on desktop (terminal + GIF), no hardware needed.
 
@@ -93,13 +93,34 @@ Maya's teal. Two blockers found investigating — resolve both before trying aga
 - Engines run in Docker, so the host's listen socket belongs to `docker-proxy`, not the engine.
   `discover_engines()` matches the *listening* process's cmdline and therefore never finds them —
   `--url` (repeatable) is mandatory in practice, not a convenience. The poller follows whichever
-  engine is actually busy. On wheatley: strata `:8085`, llama routers `:8083`/`:8084`, Maya `:8087`.
+  engine is actually busy. On wheatley: strata `:8085`, llama routers `:8083`/`:8084`, Maya `:8087`,
+  DeepSeek `:8088`.
 - Engine identity comes from `/health`: strata sends `service:"strata"`, Maya sends `version` with
   no `service`, llama.cpp sends neither. Missing the Maya case makes it fall through as llama.cpp.
+  DeepSeek (DeepSeek-V4.1-Flash on strata 0.2.7, its own container) also sends `service:"strata"`
+  and names its model (`"model": "deepseek-v4.1-flash"`); that prefix is what makes it
+  `ENGINE_DEEPSEEK` (4) rather than strata. It shares strata's bearer key and `/metrics`. On the
+  wire it is sent as strata (`WIRE_ENGINE` in `blinkd.py`): the firmware has no DeepSeek colour,
+  and the shipped panel would render a new id violet.
 - **strata 0.2 requires a bearer key on every endpoint but `/health`** — without one blinkd finds
   strata, then loops `lost ...: 401` and the panel goes dark. Set `BLINKD_API_KEY` (or `--api-key`);
   one key is sent to every engine, which is safe because engines that don't ask ignore the header.
   Only strata has a key today (read from the container's `API_KEY` env); Maya and llama.cpp don't.
+
+### Adding an engine (the owner's rule: every new engine on wheatley lands here too)
+
+Model Loader's engine switch gaining an engine means this app needs it as well, or the panel goes
+dark or shows the wrong engine while it runs. In one change:
+1. `blinkd.py`: an `ENGINE_*` id, its `_detect()` rule from `/health`, its name in the `names` map,
+   a turn in the `Simulator` cycle.
+2. Its colour. While the deployed panel is not reflashed (see "Reflashing the deployed panel"), map
+   it in `WIRE_ENGINE` to the existing engine it looks most like, so it renders in a colour the
+   panel knows instead of violet. Once a reflash is possible: an id in `blink_protocol.h`'s
+   `enum Engine`, `primary()` / `accent()` colours in `blink_renderer.cpp` (and `hitKnown` if it is
+   strata's server), and drop its `WIRE_ENGINE` entry.
+3. `blinkd.service` and the port list above: its `--url`. Then on wheatley, the same `--url` in
+   `/etc/systemd/system/blinkd.service`, `daemon-reload`, and a restart.
+4. A `test_blinkd.py` case through the fake engine.
 
 ## Conventions
 
