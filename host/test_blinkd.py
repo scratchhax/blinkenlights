@@ -239,6 +239,11 @@ class EngineTests(unittest.TestCase):
         self.assertAlmostEqual(levels["expert_hit"], 0.8, places=1)
         self.assertEqual(levels["queued"], 1)
 
+    def test_every_engine_has_a_name(self):
+        # --dump and the "watching" log line read ENGINE_NAMES; an id missing there is a KeyError.
+        ids = {v for k, v in vars(blinkd).items() if k.startswith("ENGINE_") and isinstance(v, int)}
+        self.assertEqual(ids, set(blinkd.ENGINE_NAMES))
+
     def test_radiance_goes_out_as_strata(self):
         # No Radiance colour in the firmware either; it borrows strata's (an expert-tiered MoE too).
         self.assertEqual(blinkd.pack_frame(0, blinkd.ENGINE_RADIANCE, 1, {}, [], [], [], {})[4], blinkd.ENGINE_STRATA)

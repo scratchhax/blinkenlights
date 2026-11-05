@@ -45,6 +45,10 @@ LEVELS = [
 RAW_COUNTS = {"queued", "running", "connections"}  # sent as plain counts, not 0..1
 COUNTERS = ["tokens", "prompt8", "req_start", "req_end", "drafts_accepted", "disk_bursts"]
 ENGINE_NONE, ENGINE_LLAMA, ENGINE_STRATA, ENGINE_MAYA, ENGINE_DEEPSEEK, ENGINE_RADIANCE = 0, 1, 2, 3, 4, 5
+# One table for the log line and --dump. --dump kept its own copy, which stopped at Maya and so
+# raised KeyError the first time it saw DeepSeek or Radiance.
+ENGINE_NAMES = {ENGINE_NONE: "none", ENGINE_LLAMA: "llama.cpp", ENGINE_STRATA: "strata", ENGINE_MAYA: "Maya",
+                ENGINE_DEEPSEEK: "DeepSeek", ENGINE_RADIANCE: "Radiance"}
 # The engine byte the panel is sent. DeepSeek is its own engine here (detection, logs, --dump) but
 # goes out as strata, whose server it runs on: the firmware has no DeepSeek colour, and the panel's
 # firmware predates even ENGINE_MAYA, so a new id would only render as the unknown-engine violet.
@@ -631,9 +635,7 @@ class EnginePoller(threading.Thread):
         else:
             return ENGINE_NONE, STATE_DOWN
         if url != self.url or engine != self.engine:
-            names = {ENGINE_LLAMA: "llama.cpp", ENGINE_STRATA: "strata", ENGINE_MAYA: "Maya",
-                     ENGINE_DEEPSEEK: "DeepSeek", ENGINE_RADIANCE: "Radiance"}
-            print(f"blinkd: watching {names[engine]} at {url}", file=sys.stderr)
+            print(f"blinkd: watching {ENGINE_NAMES[engine]} at {url}", file=sys.stderr)
         if url != self.url:
             self.router, self.model, self.model_at = False, None, 0.0
         self.url = url
@@ -1188,11 +1190,10 @@ def main() -> None:
         seq += 1
         if args.dump and now >= next_dump:
             next_dump = now + 1
-            names = {0: "none", 1: "llama.cpp", 2: "strata", 3: "Maya"}
             states = {0: "down", 1: "idle", 2: "reading", 3: "generating"}
             shown = " ".join(f"{n}={levels[n]:.2f}" if n not in RAW_COUNTS else f"{n}={levels[n]}"
                              for n in LEVELS if n in levels)
-            print(f"[{names[engine]} {states[state]}] {shown} counters={counters}", file=sys.stderr)
+            print(f"[{ENGINE_NAMES.get(engine, engine)} {states[state]}] {shown} counters={counters}", file=sys.stderr)
         time.sleep(max(0.0, period - (time.monotonic() - now)))
 
 
