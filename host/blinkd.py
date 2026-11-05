@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """blinkd - feeds the blinkenlights panel with everything the LLM host is doing.
 
-Samples llama.cpp, strata, DeepSeek or Maya (found by process and port, or --url), AMD GPUs through sysfs, and the
+Samples llama.cpp, strata, DeepSeek, Maya or Radiance (found by process and port, or --url), AMD GPUs through sysfs, and the
 kernel's /proc counters, normalizes it all, and sends a 92-byte frame 20 times a second to
 the ESP32 over USB serial and/or UDP. The panel does all the animation itself.
 
@@ -44,11 +44,13 @@ LEVELS = [
 ]
 RAW_COUNTS = {"queued", "running", "connections"}  # sent as plain counts, not 0..1
 COUNTERS = ["tokens", "prompt8", "req_start", "req_end", "drafts_accepted", "disk_bursts"]
-ENGINE_NONE, ENGINE_LLAMA, ENGINE_STRATA, ENGINE_MAYA, ENGINE_DEEPSEEK = 0, 1, 2, 3, 4
+ENGINE_NONE, ENGINE_LLAMA, ENGINE_STRATA, ENGINE_MAYA, ENGINE_DEEPSEEK, ENGINE_RADIANCE = 0, 1, 2, 3, 4, 5
 # The engine byte the panel is sent. DeepSeek is its own engine here (detection, logs, --dump) but
 # goes out as strata, whose server it runs on: the firmware has no DeepSeek colour, and the panel's
 # firmware predates even ENGINE_MAYA, so a new id would only render as the unknown-engine violet.
-WIRE_ENGINE = {ENGINE_DEEPSEEK: ENGINE_STRATA}
+# Radiance likewise: its own server, but the same kind of engine (a MoE with its experts tiered
+# between the cards and host RAM, an expert hit rate to show), so it borrows strata's colours.
+WIRE_ENGINE = {ENGINE_DEEPSEEK: ENGINE_STRATA, ENGINE_RADIANCE: ENGINE_STRATA}
 STATE_DOWN, STATE_IDLE, STATE_READING, STATE_GENERATING = 0, 1, 2, 3
 N_CORES, N_GPUS, N_THREADS = 16, 8, 14
 FULL_TPS = 120.0  # tokens a second that count as "flat out" (--max-tps)
@@ -599,6 +601,8 @@ class EnginePoller(threading.Thread):
         try:
             if engine == ENGINE_LLAMA:
                 return any(s.get("is_processing") for s in self._slots_any(url))
+            if engine == ENGINE_RADIANCE:
+                return int(http_json(url + "/health", None, 1.0).get("in_flight") or 0) > 0
             live = http_json(url + "/metrics", self.key, 1.0).get("live") or {}
             return live.get("state") in ("reading", "generating")
         except Exception:
@@ -628,7 +632,7 @@ class EnginePoller(threading.Thread):
             return ENGINE_NONE, STATE_DOWN
         if url != self.url or engine != self.engine:
             names = {ENGINE_LLAMA: "llama.cpp", ENGINE_STRATA: "strata", ENGINE_MAYA: "Maya",
-                     ENGINE_DEEPSEEK: "DeepSeek"}
+                     ENGINE_DEEPSEEK: "DeepSeek", ENGINE_RADIANCE: "Radiance"}
             print(f"blinkd: watching {names[engine]} at {url}", file=sys.stderr)
         if url != self.url:
             self.router, self.model, self.model_at = False, None, 0.0
@@ -676,6 +680,8 @@ class EnginePoller(threading.Thread):
                 try:
                     if engine == ENGINE_LLAMA:
                         self._poll_llama(dt)
+                    elif engine == ENGINE_RADIANCE:
+                        self._poll_radiance(dt)
                     else:
                         self._poll_strata(dt)
                     fails = 0
@@ -694,6 +700,10 @@ class EnginePoller(threading.Thread):
         except urllib.error.HTTPError as e:
             return (ENGINE_LLAMA, STATE_DOWN) if e.code == 503 else (ENGINE_NONE, STATE_DOWN)
         if isinstance(h, dict):
+            # Radiance (its own C++ server): {"status": "ok", "model": ..., "in_flight": N,
+            # "queue_cap": 32}. queue_cap is its alone; its port opens only once the model is in.
+            if "queue_cap" in h:
+                return ENGINE_RADIANCE, STATE_IDLE if h.get("status") == "ok" else STATE_DOWN
             if h.get("service") == "strata":
                 # DeepSeek-V4.1-Flash runs on strata's own server (0.2.7, its strata-dsv41 engine) in
                 # a container of its own, so it says service:strata too; the model it names is what
@@ -851,11 +861,114 @@ class EnginePoller(threading.Thread):
             self._bump("drafts_accepted", d_acc)
             self._bump("disk_bursts", disk)
 
+    # ----- Radiance: its JSON /stats (what its own dashboard reads) at 10 Hz, /metrics at 2 Hz
+    def _poll_radiance(self, dt: float) -> None:
+        """/stats lists every running request with its slot, state ("prefill" / "decode"), prompt
+        size, tokens computed and output so far. Tokens and prompt rain come from those counts'
+        movement; the expert hit rate from its expert plane's routed counters (the share of routed
+        experts that were already on a card); PCIe from its link byte counters."""
+        m = http_json(self.url + "/stats", self.key)
+        reqs = [q for q in m.get("requests") or [] if isinstance(q, dict)]
+        p = self.strata_prev
+        prev_out, prev_read = p.get("out", {}), p.get("read", {})
+        out_now, read_now = {}, {}
+        tokens = prompt = 0
+        reading = generating = False
+        prefill, ctx = None, 0.0
+        if not p.get("ctx_max"):
+            try:
+                p["ctx_max"] = int((http_json(self.url + "/v1/models", self.key, 1.0).get("data") or [{}])[0]
+                                   .get("max_model_len") or 0)
+            except (OSError, ValueError, IndexError, AttributeError):
+                p["ctx_max"] = 0
+        for q in reqs:
+            rid = q.get("id")
+            out = int(q.get("output") or 0)
+            out_now[rid] = out
+            if q.get("state") == "prefill" or (not out and q.get("state") != "decode"):
+                reading = True
+                total = int(q.get("prompt") or 0)
+                done = min(total, int(q.get("cached") or 0) + int(q.get("computed") or 0))
+                read_now[rid] = int(q.get("computed") or 0)
+                prompt += max(0, read_now[rid] - prev_read.get(rid, 0))
+                if total:
+                    prefill = max(prefill or 0.0, done / total)
+            else:
+                generating = True
+                tokens += max(0, out - prev_out.get(rid, 0))
+            if p["ctx_max"]:
+                ctx = max(ctx, int(q.get("ctx") or 0) / p["ctx_max"])
+        starts = len(set(out_now) - set(prev_out)) if "out" in p else 0
+        ends = len(set(prev_out) - set(out_now))
+        self.prompt_carry += prompt / 8
+        n_prompt = int(self.prompt_carry)
+        self.prompt_carry -= n_prompt
+
+        inst = tokens / dt if dt > 0 else 0
+        self.tok_ema += (inst - self.tok_ema) * 0.25
+        lv = {"tok_s": clamp01(self.tok_ema / FULL_TPS), "running": int(m.get("running") or len(reqs)),
+              "queued": int(m.get("waiting") or 0), "context": clamp01(ctx)}
+        if prefill is not None:
+            lv["prefill"] = clamp01(prefill)
+
+        ex = m.get("experts") or {}
+        routed, res = int(ex.get("routed") or 0), int(ex.get("routed_res") or 0)
+        if "routed" in p and routed > p["routed"]:
+            p["hit"] = clamp01((res - p["routed_res"]) / (routed - p["routed"]))
+        lv["expert_hit"] = p.get("hit", 1.0)
+        link = m.get("link") or {}
+        moved = int(link.get("h2d_bytes") or 0) + int(link.get("d2h_bytes") or 0)
+        if "moved" in p and dt > 0 and moved >= p["moved"]:
+            lv["pcie_strata"] = lnorm((moved - p["moved"]) / dt / 1e6, 1, 32000)
+        ssd = int(link.get("ssd_bytes") or 0)
+        disk = min(30, int((ssd - p["ssd"]) / (64 << 20))) if "ssd" in p and ssd > p["ssd"] else 0
+
+        # Draft acceptance from the counters (labelled Prometheus lines, which prometheus() skips).
+        now = time.monotonic()
+        d_acc = 0
+        if now >= p.get("metrics_at", 0):
+            p["metrics_at"] = now + 0.5
+            try:
+                text = http_text(self.url + "/metrics", self.key)
+                acc = _prom_sum(text, "radiance:draft_accepted_total")
+                drafted = _prom_sum(text, "radiance:draft_tokens_total")
+                if "acc" in p and acc >= p["acc"]:
+                    d_acc = int(acc - p["acc"])
+                    if drafted > p["drafted"]:
+                        self.accept_ema += ((acc - p["acc"]) / (drafted - p["drafted"]) - self.accept_ema) * 0.3
+                p.update(acc=acc, drafted=drafted)
+            except (OSError, ValueError):
+                pass
+        lv["spec_accept"] = clamp01(self.accept_ema)
+        p.update(out=out_now, read=read_now, routed=routed, routed_res=res, moved=moved, ssd=ssd)
+
+        with self.lock:
+            self.state = STATE_GENERATING if generating else STATE_READING if reading else STATE_IDLE
+            self.levels = lv
+            self._bump("tokens", tokens)
+            self._bump("prompt8", n_prompt)
+            self._bump("req_start", starts)
+            self._bump("req_end", ends)
+            self._bump("drafts_accepted", d_acc)
+            self._bump("disk_bursts", disk)
+
+
+def _prom_sum(text: str, name: str) -> float:
+    """The sum of every series of one Prometheus metric, labelled or not."""
+    total = 0.0
+    for line in text.splitlines():
+        if line.startswith(name + "{") or line.startswith(name + " "):
+            try:
+                total += float(line.rsplit(" ", 1)[1])
+            except (ValueError, IndexError):
+                pass
+    return total
+
 
 # --------------------------------------------------------------------------- simulation
 class Simulator:
     """Fake engine and host activity, so the panel can be tuned with no model running.
-    Alternates llama.cpp, strata, Maya and DeepSeek each cycle so every color scheme shows."""
+    Alternates llama.cpp, strata, Maya, DeepSeek and Radiance each cycle so every color scheme shows."""
 
     def __init__(self):
         self.t0 = time.monotonic()
@@ -874,8 +987,8 @@ class Simulator:
         t = time.monotonic() - self.t0
         cycle_len = 14.0
         cycle, ct = int(t // cycle_len), t % cycle_len
-        engine = (ENGINE_LLAMA, ENGINE_STRATA, ENGINE_MAYA, ENGINE_DEEPSEEK)[cycle % 4]
-        expert = engine != ENGINE_LLAMA  # strata's server (DeepSeek on it, and its Maya fork)
+        engine = (ENGINE_LLAMA, ENGINE_STRATA, ENGINE_MAYA, ENGINE_DEEPSEEK, ENGINE_RADIANCE)[cycle % 5]
+        expert = engine != ENGINE_LLAMA  # strata's server (DeepSeek on it, its Maya fork), Radiance
         if ct < 3:
             phase, state = "idle", STATE_IDLE
         elif ct < 4.5:

@@ -2,7 +2,7 @@
 
 Blinkenlights: a 16x16 WS2812B panel driven by LLM-engine + host telemetry.
 Three parts share one wire protocol:
-- `host/blinkd.py` — Python collector: reads llama.cpp/strata/DeepSeek/Maya + AMD GPUs + `/proc`, emits 92-byte frames at 20 Hz over UDP or USB serial.
+- `host/blinkd.py` — Python collector: reads llama.cpp/strata/DeepSeek/Maya/Radiance + AMD GPUs + `/proc`, emits 92-byte frames at 20 Hz over UDP or USB serial.
 - `firmware/` — ESP32 (PlatformIO + FastLED): parses frames, animates at 60 fps, OTA updates.
 - `preview/` — the firmware renderer rebuilt on desktop (terminal + GIF), no hardware needed.
 
@@ -94,7 +94,7 @@ Maya's teal. Two blockers found investigating — resolve both before trying aga
   `discover_engines()` matches the *listening* process's cmdline and therefore never finds them —
   `--url` (repeatable) is mandatory in practice, not a convenience. The poller follows whichever
   engine is actually busy. On wheatley: strata `:8085`, llama routers `:8083`/`:8084`, Maya `:8087`,
-  DeepSeek `:8088`.
+  DeepSeek `:8088`, Radiance `:8089`.
 - Engine identity comes from `/health`: strata sends `service:"strata"`, Maya sends `version` with
   no `service`, llama.cpp sends neither. Missing the Maya case makes it fall through as llama.cpp.
   DeepSeek (DeepSeek-V4.1-Flash on strata 0.2.7, its own container) also sends `service:"strata"`
@@ -102,6 +102,12 @@ Maya's teal. Two blockers found investigating — resolve both before trying aga
   `ENGINE_DEEPSEEK` (4) rather than strata. It shares strata's bearer key and `/metrics`. On the
   wire it is sent as strata (`WIRE_ENGINE` in `blinkd.py`): the firmware has no DeepSeek colour,
   and the shipped panel would render a new id violet.
+  Radiance (StillDeadcode's C++/HIP server, Qwen3.8-Flash-Next) answers `/health` with
+  `status`, `model`, `in_flight` and `queue_cap`; `queue_cap` is what makes it `ENGINE_RADIANCE`
+  (5). It is read from its JSON `/stats` (every running request with slot, state, prompt,
+  computed and output; the expert plane's `routed`/`routed_res`; link byte counters) plus the
+  labelled `radiance:draft_*_total` lines of `/metrics`. Sent as strata too, for the same reason.
+  It uses strata's `API_KEY` (`--api-key-env API_KEY`), so the one key covers it.
 - **strata 0.2 requires a bearer key on every endpoint but `/health`** — without one blinkd finds
   strata, then loops `lost ...: 401` and the panel goes dark. Set `BLINKD_API_KEY` (or `--api-key`);
   one key is sent to every engine, which is safe because engines that don't ask ignore the header.

@@ -51,6 +51,28 @@ class FakeEngine(BaseHTTPRequestHandler):
                 if query != "model=Big%20Model":
                     return self._send(400, {"error": {"code": 400, "message": "model name is missing from the request"}})
                 path = base
+        if self.kind == "radiance":
+            # Radiance's own server: /health with in_flight and queue_cap, /stats with every
+            # running request, labelled Prometheus counters on /metrics.
+            if path == "/health":
+                return self._send(200, {"status": "ok", "model": "m", "in_flight": 1 if busy else 0,
+                                        "queue_cap": 32})
+            if path == "/v1/models":
+                return self._send(200, {"data": [{"id": "m", "max_model_len": 8192}]})
+            if path == "/stats":
+                reqs = [{"id": cycle, "slot": 0, "state": "prefill" if reading else "decode",
+                         "prompt": 2000, "cached": 0,
+                         "computed": int(ct / 0.3 * 2000) if reading else 2000 + decoded,
+                         "output": decoded, "ctx": 2000 + decoded}] if busy else []
+                return self._send(200, {"running": len(reqs), "waiting": 1, "requests": reqs,
+                                        "experts": {"routed": int(t * 1000), "routed_res": int(t * 800)},
+                                        "link": {"h2d_bytes": int(t * 1e8), "d2h_bytes": 0,
+                                                 "ssd_bytes": int(t * 2e9)}})
+            if path == "/metrics":
+                return self._send(200, f'radiance:draft_accepted_total{{model_name="m",engine="0"}} {int(t * 20)}\n'
+                                       f'radiance:draft_tokens_total{{model_name="m",engine="0"}} {int(t * 30)}\n',
+                                  "text/plain")
+            return self._send(404, {"error": "not found"})
         if self.kind in ("llama", "router"):
             if path == "/health":
                 return self._send(200, {"status": "ok"})
@@ -201,6 +223,25 @@ class EngineTests(unittest.TestCase):
         self.assertGreater(counts["drafts_accepted"], 0)
         self.assertAlmostEqual(levels["expert_hit"], 0.8)
         self.assertEqual(levels["queued"], 1)
+
+    def test_radiance(self):
+        # Radiance (its own C++ server) is spotted by its /health and read from /stats.
+        (engine, _, levels, counts), states = self.run_poller("radiance")
+        self.assertEqual(engine, blinkd.ENGINE_RADIANCE)
+        self.assertIn(blinkd.STATE_GENERATING, states)
+        self.assertIn(blinkd.STATE_READING, states)
+        self.assertGreater(counts["tokens"], 100)
+        self.assertGreater(counts["prompt8"], 100)
+        self.assertGreaterEqual(counts["req_start"], 1)
+        self.assertGreaterEqual(counts["req_end"], 1)
+        self.assertGreater(counts["drafts_accepted"], 0)
+        self.assertGreater(counts["disk_bursts"], 0)
+        self.assertAlmostEqual(levels["expert_hit"], 0.8, places=1)
+        self.assertEqual(levels["queued"], 1)
+
+    def test_radiance_goes_out_as_strata(self):
+        # No Radiance colour in the firmware either; it borrows strata's (an expert-tiered MoE too).
+        self.assertEqual(blinkd.pack_frame(0, blinkd.ENGINE_RADIANCE, 1, {}, [], [], [], {})[4], blinkd.ENGINE_STRATA)
 
     def test_deepseek_goes_out_as_strata(self):
         # The firmware has no DeepSeek colour; on the wire it is strata, whose server it runs on.
